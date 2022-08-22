@@ -444,3 +444,16 @@ class ShiftViTModel(keras.Model):
         self.compiled_metrics.update_state(labels, logits)
         return {m.name: m.result() for m in self.metrics}
 
+# Instantiate the model
+model = ShiftViTModel(
+    data_augmentation=get_augmentation_model(),
+    projected_dim=config.projected_dim,
+    patch_size=config.patch_size,
+    num_shift_blocks_per_stages=config.num_shift_blocks_per_stages,
+    epsilon=config.epsilon,
+    mlp_dropout_rate=config.mlp_dropout_rate,
+    stochastic_depth_rate=config.stochastic_depth_rate,
+    num_div=config.num_div,
+    shift_pixel=config.shift_pixel,
+    mlp_expand_ratio=config.mlp_expand_ratio,
+)
