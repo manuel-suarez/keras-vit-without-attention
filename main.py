@@ -78,3 +78,236 @@ def get_augmentation_model():
         ]
     )
     return data_augmentation
+
+# The MLP block
+class MLP(layers.Layer):
+    """Get the MLP layer for each shift block.
+
+    Args:
+        mlp_expand_ratio (int): The ratio with which the first feature map is expanded.
+        mlp_dropout_rate (float): The rate for dropout.
+    """
+
+    def __init__(self, mlp_expand_ratio, mlp_dropout_rate, **kwargs):
+        super().__init__(**kwargs)
+        self.mlp_expand_ratio = mlp_expand_ratio
+        self.mlp_dropout_rate = mlp_dropout_rate
+
+    def build(self, input_shape):
+        input_channels = input_shape[-1]
+        initial_filters = int(self.mlp_expand_ratio * input_channels)
+
+        self.mlp = keras.Sequential(
+            [
+                layers.Dense(units=initial_filters, activation=tf.nn.gelu,),
+                layers.Dropout(rate=self.mlp_dropout_rate),
+                layers.Dense(units=input_channels),
+                layers.Dropout(rate=self.mlp_dropout_rate),
+            ]
+        )
+
+    def call(self, x):
+        x = self.mlp(x)
+        return x
+
+# Shift blocks
+class ShiftViTBlock(layers.Layer):
+    """A unit ShiftViT Block
+
+    Args:
+        shift_pixel (int): The number of pixels to shift. Default to 1.
+        mlp_expand_ratio (int): The ratio with which MLP features are
+            expanded. Default to 2.
+        mlp_dropout_rate (float): The dropout rate used in MLP.
+        num_div (int): The number of divisions of the feature map's channel.
+            Totally, 4/num_div of channels will be shifted. Defaults to 12.
+        epsilon (float): Epsilon constant.
+        drop_path_prob (float): The drop probability for drop path.
+    """
+
+    def __init__(
+        self,
+        epsilon,
+        drop_path_prob,
+        mlp_dropout_rate,
+        num_div=12,
+        shift_pixel=1,
+        mlp_expand_ratio=2,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.shift_pixel = shift_pixel
+        self.mlp_expand_ratio = mlp_expand_ratio
+        self.mlp_dropout_rate = mlp_dropout_rate
+        self.num_div = num_div
+        self.epsilon = epsilon
+        self.drop_path_prob = drop_path_prob
+
+    def build(self, input_shape):
+        self.H = input_shape[1]
+        self.W = input_shape[2]
+        self.C = input_shape[3]
+        self.layer_norm = layers.LayerNormalization(epsilon=self.epsilon)
+        self.drop_path = (
+            DropPath(drop_path_prob=self.drop_path_prob)
+            if self.drop_path_prob > 0.0
+            else layers.Activation("linear")
+        )
+        self.mlp = MLP(
+            mlp_expand_ratio=self.mlp_expand_ratio,
+            mlp_dropout_rate=self.mlp_dropout_rate,
+        )
+
+    def get_shift_pad(self, x, mode):
+        """Shifts the channels according to the mode chosen."""
+        if mode == "left":
+            offset_height = 0
+            offset_width = 0
+            target_height = 0
+            target_width = self.shift_pixel
+        elif mode == "right":
+            offset_height = 0
+            offset_width = self.shift_pixel
+            target_height = 0
+            target_width = self.shift_pixel
+        elif mode == "up":
+            offset_height = 0
+            offset_width = 0
+            target_height = self.shift_pixel
+            target_width = 0
+        else:
+            offset_height = self.shift_pixel
+            offset_width = 0
+            target_height = self.shift_pixel
+            target_width = 0
+        crop = tf.image.crop_to_bounding_box(
+            x,
+            offset_height=offset_height,
+            offset_width=offset_width,
+            target_height=self.H - target_height,
+            target_width=self.W - target_width,
+        )
+        shift_pad = tf.image.pad_to_bounding_box(
+            crop,
+            offset_height=offset_height,
+            offset_width=offset_width,
+            target_height=self.H,
+            target_width=self.W,
+        )
+        return shift_pad
+
+    def call(self, x, training=False):
+        # Split the feature maps
+        x_splits = tf.split(x, num_or_size_splits=self.C // self.num_div, axis=-1)
+
+        # Shift the feature maps
+        x_splits[0] = self.get_shift_pad(x_splits[0], mode="left")
+        x_splits[1] = self.get_shift_pad(x_splits[1], mode="right")
+        x_splits[2] = self.get_shift_pad(x_splits[2], mode="up")
+        x_splits[3] = self.get_shift_pad(x_splits[3], mode="down")
+
+        # Concatenate the shifted and unshifted feature maps
+        x = tf.concat(x_splits, axis=-1)
+
+        # Add the residual connection
+        shortcut = x
+        x = shortcut + self.drop_path(self.mlp(self.layer_norm(x)), training=training)
+        return x
+
+# Patch layer
+class PatchMerging(layers.Layer):
+    """The Patch Merging layer.
+
+    Args:
+        epsilon (float): The epsilon constant.
+    """
+
+    def __init__(self, epsilon, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+
+    def build(self, input_shape):
+        filters = 2 * input_shape[-1]
+        self.reduction = layers.Conv2D(
+            filters=filters, kernel_size=2, strides=2, padding="same", use_bias=False
+        )
+        self.layer_norm = layers.LayerNormalization(epsilon=self.epsilon)
+
+    def call(self, x):
+        # Apply the patch merging algorithm on the feature maps
+        x = self.layer_norm(x)
+        x = self.reduction(x)
+        return x
+
+# Note: This layer will have a different depth of stacking
+# for different stages on the model.
+class StackedShiftBlocks(layers.Layer):
+    """The layer containing stacked ShiftViTBlocks.
+
+    Args:
+        epsilon (float): The epsilon constant.
+        mlp_dropout_rate (float): The dropout rate used in the MLP block.
+        num_shift_blocks (int): The number of shift vit blocks for this stage.
+        stochastic_depth_rate (float): The maximum drop path rate chosen.
+        is_merge (boolean): A flag that determines the use of the Patch Merge
+            layer after the shift vit blocks.
+        num_div (int): The division of channels of the feature map. Defaults to 12.
+        shift_pixel (int): The number of pixels to shift. Defaults to 1.
+        mlp_expand_ratio (int): The ratio with which the initial dense layer of
+            the MLP is expanded Defaults to 2.
+    """
+
+    def __init__(
+        self,
+        epsilon,
+        mlp_dropout_rate,
+        num_shift_blocks,
+        stochastic_depth_rate,
+        is_merge,
+        num_div=12,
+        shift_pixel=1,
+        mlp_expand_ratio=2,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self.mlp_dropout_rate = mlp_dropout_rate
+        self.num_shift_blocks = num_shift_blocks
+        self.stochastic_depth_rate = stochastic_depth_rate
+        self.is_merge = is_merge
+        self.num_div = num_div
+        self.shift_pixel = shift_pixel
+        self.mlp_expand_ratio = mlp_expand_ratio
+
+    def build(self, input_shapes):
+        # Calculate stochastic depth probabilities.
+        # Reference: https://keras.io/examples/vision/cct/#the-final-cct-model
+        dpr = [
+            x
+            for x in np.linspace(
+                start=0, stop=self.stochastic_depth_rate, num=self.num_shift_blocks
+            )
+        ]
+
+        # Build the shift blocks as a list of ShiftViT Blocks
+        self.shift_blocks = list()
+        for num in range(self.num_shift_blocks):
+            self.shift_blocks.append(
+                ShiftViTBlock(
+                    num_div=self.num_div,
+                    epsilon=self.epsilon,
+                    drop_path_prob=dpr[num],
+                    mlp_dropout_rate=self.mlp_dropout_rate,
+                    shift_pixel=self.shift_pixel,
+                    mlp_expand_ratio=self.mlp_expand_ratio,
+                )
+            )
+        if self.is_merge:
+            self.patch_merge = PatchMerging(epsilon=self.epsilon)
+
+    def call(self, x, training=False):
+        for shift_block in self.shift_blocks:
+            x = shift_block(x, training=training)
+        if self.is_merge:
+            x = self.patch_merge(x)
+        return x
