@@ -535,7 +535,7 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
             step > self.total_steps, 0.0, learning_rate, name="learning_rate"
         )
 
-Compile and train the model
+# Compile and train the model
 # Get the total number of steps for training.
 total_steps = int((len(x_train) / config.batch_size) * config.epochs)
 
