@@ -110,6 +110,28 @@ class MLP(layers.Layer):
         x = self.mlp(x)
         return x
 
+# DropPath layer
+class DropPath(layers.Layer):
+    """Drop Path also known as the Stochastic Depth layer.
+
+    Refernece:
+        - https://keras.io/examples/vision/cct/#stochastic-depth-for-regularization
+        - github.com:rwightman/pytorch-image-models
+    """
+
+    def __init__(self, drop_path_prob, **kwargs):
+        super().__init__(**kwargs)
+        self.drop_path_prob = drop_path_prob
+
+    def call(self, x, training=False):
+        if training:
+            keep_prob = 1 - self.drop_path_prob
+            shape = (tf.shape(x)[0],) + (1,) * (len(tf.shape(x)) - 1)
+            random_tensor = keep_prob + tf.random.uniform(shape, 0, 1)
+            random_tensor = tf.floor(random_tensor)
+            return (x / keep_prob) * random_tensor
+        return x
+
 # Shift blocks
 class ShiftViTBlock(layers.Layer):
     """A unit ShiftViT Block
