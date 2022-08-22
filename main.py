@@ -534,3 +534,48 @@ class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
         return tf.where(
             step > self.total_steps, 0.0, learning_rate, name="learning_rate"
         )
+
+Compile and train the model
+# Get the total number of steps for training.
+total_steps = int((len(x_train) / config.batch_size) * config.epochs)
+
+# Calculate the number of steps for warmup.
+warmup_epoch_percentage = 0.15
+warmup_steps = int(total_steps * warmup_epoch_percentage)
+
+# Initialize the warmupcosine schedule.
+scheduled_lrs = WarmUpCosine(
+    lr_start=1e-5, lr_max=1e-3, warmup_steps=warmup_steps, total_steps=total_steps,
+)
+
+# Get the optimizer.
+optimizer = tfa.optimizers.AdamW(
+    learning_rate=scheduled_lrs, weight_decay=config.weight_decay
+)
+
+# Compile and pretrain the model.
+model.compile(
+    optimizer=optimizer,
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=[
+        keras.metrics.SparseCategoricalAccuracy(name="accuracy"),
+        keras.metrics.SparseTopKCategoricalAccuracy(5, name="top-5-accuracy"),
+    ],
+)
+
+# Train the model
+history = model.fit(
+    train_ds,
+    epochs=config.epochs,
+    validation_data=val_ds,
+    callbacks=[
+        keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=5, mode="auto",)
+    ],
+)
+
+# Evaluate the model with the test dataset.
+print("TESTING")
+loss, acc_top1, acc_top5 = model.evaluate(test_ds)
+print(f"Loss: {loss:0.2f}")
+print(f"Top 1 test accuracy: {acc_top1*100:0.2f}%")
+print(f"Top 5 test accuracy: {acc_top5*100:0.2f}%")
