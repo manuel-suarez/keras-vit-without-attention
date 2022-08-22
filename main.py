@@ -66,3 +66,15 @@ val_ds = val_ds.batch(config.batch_size).prefetch(AUTO)
 test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
 test_ds = test_ds.batch(config.batch_size).prefetch(AUTO)
 
+# Data Augmentation
+def get_augmentation_model():
+    """Build the data augmentation model."""
+    data_augmentation = keras.Sequential(
+        [
+            layers.Resizing(config.input_shape[0] + 20, config.input_shape[0] + 20),
+            layers.RandomCrop(config.image_size, config.image_size),
+            layers.RandomFlip("horizontal"),
+            layers.Rescaling(1 / 255.0),
+        ]
+    )
+    return data_augmentation
