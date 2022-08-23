@@ -42,7 +42,7 @@ class Config(object):
     weight_decay = 1e-4
 
     # TRAINING
-    epochs = 100
+    epochs = 300
 
 config = Config()
 
