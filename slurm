@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --partition=GPU
-#SBATCH --job-name=keras-image-classification-with-vit
+#SBATCH --job-name=keras-vit-without-attention
 #SBATCH --ntasks=1
 #SBATCH --output=result.log
 #SBATCH --mem=0
